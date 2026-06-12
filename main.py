@@ -1,0 +1,90 @@
+import os
+from fastapi import FastAPI, Header, HTTPException, BackgroundTasks, status
+from pydantic import BaseModel, EmailStr
+from pipeline import process_and_store_user, purge_analytical_data
+from prometheus_fastapi_instrumentator import Instrumentator
+
+app = FastAPI(
+    title="CampLog Data Platform Ingestion API",
+    description="API de alta performance para ingestão de eventos e telemetria analítica com conformidade LGPD.",
+    version="1.0.0"
+)
+
+# Instrumentação de Métricas do Prometheus
+Instrumentator().instrument(app).expose(app)
+
+# Chave secreta de autenticação entre microsserviços
+SECRET_SIGNATURE = os.getenv("DATA_PLATFORM_SECRET", "camp-log-data-sec-123")
+
+# Schema de Validação de Dados recebido do Backend (Pydantic v2)
+class UserCreatedPayload(BaseModel):
+    userId: str
+    name: str
+    email: EmailStr
+    provider: str
+    createdAt: str
+
+@app.get("/health", status_code=status.HTTP_200_OK)
+def health_check():
+    """
+    Verificação de saúde (Health Check) do microsserviço do Data Platform.
+    """
+    return {"status": "healthy", "service": "camplog-data-platform"}
+
+@app.post("/api/v1/events/user-created", status_code=status.HTTP_202_ACCEPTED)
+def ingest_user_created_event(
+    payload: UserCreatedPayload,
+    background_tasks: BackgroundTasks,
+    x_camplog_signature: str = Header(None)
+):
+    """
+    Recebe os eventos assíncronos 'USER_CREATED' disparados pelo backend REST,
+    valida a assinatura de autenticação e delega para o pipeline analítico de forma não bloqueante.
+    """
+    # 1. Validação de Assinatura de Segurança (Shared Secret)
+    if not x_camplog_signature or x_camplog_signature != SECRET_SIGNATURE:
+        print(f"[DATA PLATFORM - AUTH FAILED] Assinatura incorreta recebida: {x_camplog_signature}")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Assinatura X-CampLog-Signature ausente ou inválida."
+        )
+
+    print(f"[DATA PLATFORM] Evento de cadastro recebido com sucesso para o ID: {payload.userId}")
+
+    # 2. Execução não-bloqueante via BackgroundTasks do FastAPI
+    # Isso desonera a thread do servidor de responder imediatamente ao webhook do Backend
+    background_tasks.add_task(process_and_store_user, payload.model_dump())
+
+    return {
+        "status": "success",
+        "message": "Evento aceito com sucesso e agendado para higienização e persistência no Data Lake."
+    }
+
+class PurgePayload(BaseModel):
+    emails: list[EmailStr] | None = None
+    all: bool | None = False
+
+@app.delete("/api/v1/events/users/purge", status_code=status.HTTP_200_OK)
+def purge_users_data(
+    payload: PurgePayload,
+    x_camplog_signature: str = Header(None)
+):
+    """
+    Remove registros analíticos (LGPD) de todos os usuários ou de e-mails específicos.
+    """
+    if not x_camplog_signature or x_camplog_signature != SECRET_SIGNATURE:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Assinatura X-CampLog-Signature ausente ou inválida."
+        )
+
+    result = purge_analytical_data(emails=payload.emails, purge_all=payload.all)
+    if result.get("status") == "error":
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=result.get("message"))
+
+    return result
+
+if __name__ == "__main__":
+    import uvicorn
+    # Inicialização direta do servidor web para testes
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
