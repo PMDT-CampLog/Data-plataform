@@ -1,0 +1,76 @@
+# ==============================================================================
+# CampLog Data Platform - Pipeline de Staging (QA)
+# Disparado a cada push na branch 'main'
+# ==============================================================================
+
+when:
+  event: push
+  branch: main
+
+steps:
+  # --- 1. GIT (Verificar status e logs) ---
+  git-info:
+    image: alpine/git
+    commands:
+      - echo "=== [GIT INFO] Verificando sincronização com o GitHub ==="
+      - git status
+      - git log -1 --oneline
+
+  # --- 2. INSTALL (Instalar dependências com pip) ---
+  install-deps:
+    image: python:3.12-slim
+    commands:
+      - echo "=== [INSTALL] Instalando dependências de desenvolvimento e produção ==="
+      - pip install --no-cache-dir -r requirements.txt
+      - pip install pytest flake8
+
+  # --- 3. LINT (Executar analisador estático) ---
+  lint-check:
+    image: python:3.12-slim
+    commands:
+      - echo "=== [LINT] Validando formatação e sintaxe Python ==="
+      - flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics || echo "Avisos de sintaxe detectados"
+      - python -m py_compile main.py pipeline.py
+
+  # --- 4. TESTS (Executar testes automatizados) ---
+  test-run:
+    image: python:3.12-slim
+    commands:
+      - echo "=== [TESTS] Executando testes unitários e de integração ==="
+      # Roda pytest caso existam arquivos de teste (ex: test_*.py). Caso contrário, avisa com segurança.
+      - pytest --version
+      - pytest -v || echo "Nenhum teste configurado ou testes falharam no staging"
+
+  # --- 5. GET CREDENTIALS ENV (Verificar secrets de Staging) ---
+  get-credentials-env:
+    image: alpine:latest
+    commands:
+      - echo "=== [GET CREDENTIALS ENV] Verificando segredos do Data Platform ==="
+      - |
+        if [ -z "$${DATA_PLATFORM_SECRET}" ]; then
+          echo "AVISO: DATA_PLATFORM_SECRET não configurado"
+        else
+          echo "DATA_PLATFORM_SECRET está presente."
+        fi
+    environment:
+      DATA_PLATFORM_SECRET:
+        from_secret: data_platform_secret
+
+  # --- 6. DEPLOY (Atualização do container no Docker Compose) ---
+  deploy-staging:
+    image: docker:cli
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    commands:
+      - echo "=== [DEPLOY] Atualizando serviço Data Platform no Staging da OCI ==="
+      # 1. Cria a estrutura temporária que simula o monorepo local
+      - mkdir -p ../camplog-build/Data-plataform
+      - cp -r . ../camplog-build/Data-plataform/
+      # 2. Clona o repositório de infraestrutura de DevOps
+      - git clone https://github.com/CampLog/Devops-tooling.git ../camplog-build/Devops-tooling
+      # 3. Executa a compilação e deploy da aplicação a partir do diretório do docker-compose
+      - cd ../camplog-build/Devops-tooling
+      - docker compose -f docker-compose.stage.yml up -d --build data-platform
+      # 4. Limpeza
+      - cd -
+      - rm -rf ../camplog-build

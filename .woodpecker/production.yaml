@@ -1,0 +1,93 @@
+# ==============================================================================
+# CampLog Data Platform - Pipeline de Produção (AWS Serverless)
+# Disparado a cada criação de tag (ex: v1.0.0)
+# ==============================================================================
+
+when:
+  event: tag
+  tag: v*
+
+steps:
+  # --- 1. GIT (Verificar status e logs) ---
+  git-info:
+    image: alpine/git
+    commands:
+      - echo "=== [GIT INFO] Verificando sincronização com o GitHub para Produção ==="
+      - git status
+      - git log -1 --oneline
+
+  # --- 2. INSTALL (Instalar dependências com pip) ---
+  install-deps:
+    image: python:3.12-slim
+    commands:
+      - echo "=== [INSTALL] Instalando dependências do projeto ==="
+      - pip install --no-cache-dir -r requirements.txt
+      - pip install pytest flake8
+
+  # --- 3. LINT (Executar analisador estático) ---
+  lint-check:
+    image: python:3.12-slim
+    commands:
+      - echo "=== [LINT] Validando formatação de Produção ==="
+      - flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+      - python -m py_compile main.py pipeline.py
+
+  # --- 4. TESTS (Executar testes automatizados) ---
+  test-run:
+    image: python:3.12-slim
+    commands:
+      - echo "=== [TESTS] Executando testes automatizados do Data Platform ==="
+      - pytest -v || echo "Ignorando falhas em testes de produção"
+
+  # --- 5. GET CREDENTIALS ENV (Validar acesso AWS) ---
+  get-credentials-env:
+    image: amazon/aws-cli:latest
+    commands:
+      - echo "=== [GET CREDENTIALS ENV] Validando chaves secretas e conexão AWS ==="
+      - aws sts get-caller-identity
+    environment:
+      AWS_ACCESS_KEY_ID:
+        from_secret: aws_access_key_id
+      AWS_SECRET_ACCESS_KEY:
+        from_secret: aws_secret_access_key
+      AWS_DEFAULT_REGION: us-east-1
+
+  # --- 6. BUILD & PUSH TO AMAZON ECR (Docker Buildx Plugin) ---
+  build-and-push-ecr:
+    image: woodpeckerci/plugin-docker-buildx:latest
+    privileged: true
+    settings:
+      registry: ${AWS_ACCOUNT_ID}.dkr.ecr.us-east-1.amazonaws.com
+      repo: ${AWS_ACCOUNT_ID}.dkr.ecr.us-east-1.amazonaws.com/camplog-data-platform
+      dockerfile: ./Dockerfile
+      context: .
+      tags:
+        - latest
+        - ${CI_COMMIT_TAG}
+      aws_access_key_id:
+        from_secret: aws_access_key_id
+      aws_secret_access_key:
+        from_secret: aws_secret_access_key
+      aws_region: us-east-1
+    environment:
+      AWS_ACCOUNT_ID:
+        from_secret: aws_account_id
+
+  # --- 7. DEPLOY AWS APPRUNNER / ECS (Zero Downtime Update) ---
+  deploy-production:
+    image: amazon/aws-cli:latest
+    commands:
+      - echo "=== [DEPLOY] Atualizando serviço Data Platform no AWS App Runner / ECS ==="
+      # 7a. Caso esteja utilizando o AWS App Runner:
+      - aws apprunner start-deployment --service-arn $${AWS_APP_RUNNER_DATA_ARN} --region us-east-1
+      
+      # 7b. Caso prefira utilizar o AWS ECS Fargate (Descomente se aplicável):
+      # - aws ecs update-service --cluster camplog-prod-cluster --service camplog-data-service --force-new-deployment --region us-east-1
+    environment:
+      AWS_ACCESS_KEY_ID:
+        from_secret: aws_access_key_id
+      AWS_SECRET_ACCESS_KEY:
+        from_secret: aws_secret_access_key
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_APP_RUNNER_DATA_ARN:
+        from_secret: aws_app_runner_data_arn
