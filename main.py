@@ -84,6 +84,35 @@ def purge_users_data(
 
     return result
 
+from fastapi.staticfiles import StaticFiles
+from storage import handle_upload, LOCAL_UPLOAD_DIR
+from fastapi import UploadFile, File
+
+if os.getenv("ENVIRONMENT", "local") == "local":
+    app.mount("/uploads", StaticFiles(directory=LOCAL_UPLOAD_DIR), name="uploads")
+
+@app.post("/api/v1/storage/upload", status_code=status.HTTP_201_CREATED)
+def upload_media(
+    file: UploadFile = File(...),
+    folder: str = "profiles",
+    x_camplog_signature: str = Header(None)
+):
+    """
+    Endpoint para envio de arquivos de mídia (imagens de perfil, banners).
+    Salva localmente ou S3 dependendo do ambiente.
+    """
+    if not x_camplog_signature or x_camplog_signature != SECRET_SIGNATURE:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Assinatura X-CampLog-Signature ausente ou inválida."
+        )
+        
+    url = handle_upload(file, folder=folder)
+    if not url:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Falha no upload do arquivo.")
+        
+    return {"status": "success", "url": url}
+
 if __name__ == "__main__":
     import uvicorn
     # Inicialização direta do servidor web para testes
