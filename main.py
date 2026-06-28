@@ -1,7 +1,7 @@
 import os
 from fastapi import FastAPI, Header, HTTPException, BackgroundTasks, status
 from pydantic import BaseModel, EmailStr
-from pipeline import process_and_store_user, purge_analytical_data
+from pipeline import process_and_store_user, purge_analytical_data, process_spotify_event
 from prometheus_fastapi_instrumentator import Instrumentator
 
 app = FastAPI(
@@ -58,6 +58,36 @@ def ingest_user_created_event(
     return {
         "status": "success",
         "message": "Evento aceito com sucesso e agendado para higienização e persistência no Data Lake."
+    }
+
+class SpotifyEventPayload(BaseModel):
+    userId: str
+    eventType: str # LINKED, UNLINKED, TRACK_PINNED
+    trackId: str | None = None
+    timestamp: str
+
+@app.post("/api/v1/events/spotify", status_code=status.HTTP_202_ACCEPTED)
+def ingest_spotify_event(
+    payload: SpotifyEventPayload,
+    background_tasks: BackgroundTasks,
+    x_camplog_signature: str = Header(None)
+):
+    """
+    Recebe os eventos assíncronos do Spotify (link, unlink, música fixada) disparados pelo backend.
+    """
+    if not x_camplog_signature or x_camplog_signature != SECRET_SIGNATURE:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Assinatura X-CampLog-Signature ausente ou inválida."
+        )
+
+    print(f"[DATA PLATFORM] Evento Spotify ({payload.eventType}) recebido para o ID: {payload.userId}")
+
+    background_tasks.add_task(process_spotify_event, payload.model_dump())
+    
+    return {
+        "status": "success",
+        "message": "Evento Spotify aceito com sucesso."
     }
 
 class PurgePayload(BaseModel):

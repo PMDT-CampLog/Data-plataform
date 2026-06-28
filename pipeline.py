@@ -192,3 +192,37 @@ def purge_analytical_data(emails: list[str] = None, purge_all: bool = False) -> 
         
     return {"status": "error", "message": "Nenhum parâmetro de remoção válido fornecido."}
 
+
+def process_spotify_event(event_data: dict):
+    """
+    Processa eventos do Spotify (LINKED, UNLINKED, TRACK_PINNED) e persiste no DuckDB.
+    """
+    try:
+        conn = duckdb.connect(DUCKDB_FILE)
+        
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS spotify_events (
+                user_id VARCHAR,
+                event_type VARCHAR,
+                track_id VARCHAR,
+                event_timestamp TIMESTAMP
+            )
+        """)
+        
+        conn.execute("""
+            INSERT INTO spotify_events 
+            (user_id, event_type, track_id, event_timestamp) 
+            VALUES (?, ?, ?, ?)
+        """, [
+            event_data.get("userId"),
+            event_data.get("eventType"),
+            event_data.get("trackId"),
+            event_data.get("timestamp")
+        ])
+        
+        count = conn.execute("SELECT COUNT(*) FROM spotify_events").fetchone()[0]
+        conn.close()
+        
+        print(f"[DATA PLATFORM] Evento Spotify salvo no DuckDB. Total na tabela: {count}")
+    except Exception as e:
+        print(f"[DATA PLATFORM] Erro ao persistir evento Spotify no DuckDB warehouse: {e}")
