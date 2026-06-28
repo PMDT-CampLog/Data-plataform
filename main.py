@@ -2,6 +2,7 @@ import os
 from fastapi import FastAPI, Header, HTTPException, BackgroundTasks, status
 from pydantic import BaseModel, EmailStr
 from pipeline import process_and_store_user, purge_analytical_data, process_spotify_event
+from search_indexer import SearchIndexerWorker
 from prometheus_fastapi_instrumentator import Instrumentator
 
 app = FastAPI(
@@ -142,6 +143,59 @@ def upload_media(
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Falha no upload do arquivo.")
         
     return {"status": "success", "url": url}
+
+# ===========================================================================
+# Ingestão de Eventos de Conexões (Follow/Unfollow) para o Search Indexer
+# ===========================================================================
+
+# Instância do worker de indexação — inicializada uma única vez
+search_indexer = SearchIndexerWorker()
+
+class ProfileConnectionEventPayload(BaseModel):
+    """Payload do evento de conexão enviado pelo backend Spring."""
+    eventType: str  # PROFILE_FOLLOWED | PROFILE_UNFOLLOWED
+    followerId: str
+    followerType: str  # CREATOR | SUPPORTER
+    followedId: str
+    followedType: str  # CREATOR | SUPPORTER
+    occurredAt: str
+
+@app.post("/api/v1/events/profile-connection", status_code=status.HTTP_202_ACCEPTED)
+def ingest_profile_connection_event(
+    payload: ProfileConnectionEventPayload,
+    background_tasks: BackgroundTasks,
+    x_camplog_signature: str = Header(None)
+):
+    """
+    Recebe eventos de conexão (follow/unfollow) do backend e delega
+    ao SearchIndexerWorker para atualização do índice de busca em near-real-time.
+    """
+    if not x_camplog_signature or x_camplog_signature != SECRET_SIGNATURE:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Assinatura X-CampLog-Signature ausente ou inválida."
+        )
+
+    print(f"[DATA PLATFORM] Evento de conexão ({payload.eventType}) recebido: "
+          f"{payload.followerType}:{payload.followerId} → {payload.followedType}:{payload.followedId}")
+
+    event_data = payload.model_dump()
+
+    if payload.eventType == "PROFILE_FOLLOWED":
+        background_tasks.add_task(search_indexer.process_follow_event, event_data)
+    elif payload.eventType == "PROFILE_UNFOLLOWED":
+        background_tasks.add_task(search_indexer.process_unfollow_event, event_data)
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Tipo de evento desconhecido: {payload.eventType}"
+        )
+
+    return {
+        "status": "success",
+        "message": f"Evento {payload.eventType} aceito para indexação."
+    }
+
 
 if __name__ == "__main__":
     import uvicorn
